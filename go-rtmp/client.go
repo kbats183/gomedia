@@ -48,6 +48,9 @@ type RtmpClient struct {
 	streamId       uint32
 	writeChunkSize uint32
 	isPublish      bool
+	bytesRead      uint32
+	bytesWritten   uint32
+	lastAckBytes   uint32
 }
 
 func NewRtmpClient(options ...func(*RtmpClient)) *RtmpClient {
@@ -172,6 +175,7 @@ func (cli *RtmpClient) GetState() RtmpState {
 }
 
 func (cli *RtmpClient) Input(data []byte) error {
+	cli.bytesRead += uint32(len(data))
 
 	switch cli.state {
 	case HandShake:
@@ -194,7 +198,10 @@ func (cli *RtmpClient) Input(data []byte) error {
 
 		err := cli.reader.readRtmpMessage(data, func(msg *rtmpMessage) error {
 			cli.timestamp = msg.timestamp
-			return cli.handleMessage(msg)
+			if err := cli.handleMessage(msg); err != nil {
+				return err
+			}
+			return cli.sendAcknowledgement()
 		})
 
 		if err != nil {
@@ -214,6 +221,16 @@ func (cli *RtmpClient) WriteFrame(cid codec.CodecID, frame []byte, pts, dts uint
 	} else {
 		return errors.New("unsupport codec id")
 	}
+}
+
+func (cli *RtmpClient) sendAcknowledgement() error {
+	if cli.wndAckSize > 0 && cli.bytesRead-cli.lastAckBytes >= cli.wndAckSize {
+		ack := makeAcknowledgementSize(cli.bytesRead)
+		bufs := cli.userCtrlChan.writeData(ack, ACKNOWLEDGEMENT, 0, 0)
+		cli.lastAckBytes = cli.bytesRead
+		return cli.output(bufs)
+	}
+	return nil
 }
 
 func (cli *RtmpClient) WriteAudio(cid codec.CodecID, frame []byte, pts, dts uint32) error {
@@ -277,13 +294,17 @@ func (cli *RtmpClient) handleMessage(msg *rtmpMessage) error {
 		//TODO
 	case ACKNOWLEDGEMENT:
 		if len(msg.msg) < 4 {
-			return errors.New("bytes of \"window acknowledgement size\"  < 4")
+			return errors.New("bytes of \"acknowledgement\"  < 4")
 		}
-		cli.wndAckSize = binary.BigEndian.Uint32(msg.msg)
+		ackBytes := binary.BigEndian.Uint32(msg.msg)
+		cli.lastAckBytes = ackBytes
 	case USER_CONTROL:
 		return cli.handleUserEvent(msg.msg)
 	case WND_ACK_SIZE:
-		//TODO
+		if len(msg.msg) < 4 {
+			return errors.New("bytes of \"window acknowledgement size\"  < 4")
+		}
+		cli.wndAckSize = binary.BigEndian.Uint32(msg.msg)
 	case SET_PEER_BW:
 		//TODO
 	case AUDIO:
@@ -313,9 +334,16 @@ func (cli *RtmpClient) handleUserEvent(data []byte) error {
 	case SetBufferLength:
 	case StreamIsRecorded:
 	case PingRequest:
+		if len(event.data) > 0 {
+			pingResponse := makeUserControlMessage(PingResponse, int(event.data[0]))
+			bufs := cli.userCtrlChan.writeData(pingResponse, USER_CONTROL, 0, 0)
+			if err := cli.output(bufs); err != nil {
+				return err
+			}
+		}
 	case PingResponse:
 	default:
-		panic("unkown event")
+		return errors.New("unknown user control event")
 	}
 	return nil
 }

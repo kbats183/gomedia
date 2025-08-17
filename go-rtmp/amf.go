@@ -82,15 +82,23 @@ func (amf *amf0Item) encode() []byte {
 }
 
 func (amf *amf0Item) decode(data []byte) int {
-	_ = data[0]
+	if len(data) == 0 {
+		return 0
+	}
 	amf.amfType = AMF0_DATA_TYPE(data[0])
 	switch amf.amfType {
 	case AMF0_NUMBER:
+		if len(data) < 9 {
+			return 1
+		}
 		amf.length = 8
 		v := math.Float64frombits(binary.BigEndian.Uint64(data[1:]))
 		amf.value = v
 		return 9
 	case AMF0_BOOLEAN:
+		if len(data) < 2 {
+			return 1
+		}
 		amf.length = 1
 		if data[1] == 1 {
 			amf.value = true
@@ -99,7 +107,13 @@ func (amf *amf0Item) decode(data []byte) int {
 		}
 		return 2
 	case AMF0_STRING:
+		if len(data) < 3 {
+			return 1
+		}
 		amf.length = int(binary.BigEndian.Uint16(data[1:]))
+		if len(data[3:]) < amf.length {
+			return 1
+		}
 		str := make([]byte, amf.length)
 		copy(str, data[3:3+amf.length])
 		amf.value = str
@@ -109,31 +123,50 @@ func (amf *amf0Item) decode(data []byte) int {
 		pos := 1
 		for {
 			if len(data[pos:]) < 3 {
-				panic("insufficient data for AMF0_OBJECT")
+				return pos
 			}
 			if data[pos] == 0x00 && data[pos+1] == 0x00 && data[pos+2] == byte(AMF0_OBJECT_END) {
 				return pos + 3
 			}
+			if len(data[pos:]) < 2 {
+				return pos
+			}
 			length := int(binary.BigEndian.Uint16(data[pos:]))
 			if len(data[pos+2:]) < length {
-				panic("insufficient data for object key")
+				return pos
 			}
 			key := string(data[pos+2 : pos+2+length])
 			pos += 2 + length
 
+			if len(data[pos:]) == 0 {
+				return pos
+			}
 			valueItem := &amf0Item{}
 			valueLength := valueItem.decode(data[pos:])
+			if valueLength == 0 {
+				return pos
+			}
 			amf.value.(map[string]interface{})[key] = valueItem.value
 			pos += valueLength
 		}
 	case AMF0_NULL:
 	case AMF0_LONG_STRING:
+		if len(data) < 5 {
+			return 1
+		}
 		amf.length = int(binary.BigEndian.Uint32(data[1:]))
+		if len(data[5:]) < amf.length {
+			return 1
+		}
 		str := make([]byte, amf.length)
 		copy(str, data[5:5+amf.length])
+		amf.value = str
 		return 5 + amf.length
 	case AMF0_UNDEFINED:
 	case AMF0_ECMA_ARRAY:
+		if len(data) < 5 {
+			return 1
+		}
 		return 5
 	default:
 		panic(fmt.Sprintf("unsupport amf type %d", amf.amfType))
